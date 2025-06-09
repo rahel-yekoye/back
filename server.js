@@ -4,52 +4,46 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
-const bcrypt = require('bcryptjs'); // Replace bcrypt with bcryptjs
+const bcrypt = require('bcryptjs'); 
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const Message = require('./models/message'); // Import Message model
-const User = require('./models/user'); // Import User model
-const Group = require('./models/group'); // Adjust the path if necessary
+const Message = require('./models/message'); 
+const User = require('./models/user'); 
+const Group = require('./models/group'); 
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
 const multer = require('multer');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
-const Joi = require('joi'); // Import Joi for validation
-const { groupSchema } = require('./schemas'); // Import groupSchema
+const Joi = require('joi'); 
+const { groupSchema } = require('./schemas'); 
 const app = express();
-const fs = require('fs'); // for file handling (e.g., audio uploads in future)
+const fs = require('fs'); 
 const port = 4000;
 
-// Temporary storage for verification codes
 const verificationCodes = new Map();
 
-// Create HTTP server to attach Socket.IO
 const server = http.createServer(app);
 
-// Initialize Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: '*', // Allow requests from any origin (adjust this for production)
+    origin: '*', 
     methods: ['GET', 'POST']
   }
 });
-
-// Middleware
+//middleware ..cors handles frontend requests and express the api framework
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
-  .then(() => console.log('✅ Connected to MongoDB'))
-  .catch((err) => console.error('❌ MongoDB connection error:', err));
+  .then(() => console.log(' Connected to MongoDB'))
+  .catch((err) => console.error('MongoDB connection error:', err));
 
-// Test route
 app.get('/', (req, res) => {
-  res.send('🚀 Chat App Backend with Real-Time is Running!');
+  res.send(' Chat App Backend with Real-Time is Running!');
 });
 
 const registerSchema = Joi.object({
@@ -59,7 +53,7 @@ const registerSchema = Joi.object({
   password: Joi.string().min(6).required(),
 });
 
-// Registration endpoint
+
 app.post('/register', async (req, res) => {
   const { error } = registerSchema.validate(req.body);
   if (error) {
@@ -68,41 +62,37 @@ app.post('/register', async (req, res) => {
 
   const { username, email, phoneNumber, password } = req.body;
 
-  console.log('Received registration data:', req.body); // Debug log
+  console.log('Received registration data:', req.body);
 
   if (!username || !email || !phoneNumber || !password) {
-    console.log('Missing required fields'); // Debug log
+    console.log('Missing required fields'); 
     return res.status(400).json({ error: 'All fields are required' });
   }
 
   try {
-    // Check if the username already exists
+
     const existingUser = await User.findOne({ username });
     if (existingUser) {
-      console.log('Username already exists:', username); // Debug log
+      console.log('Username already exists:', username); 
       return res.status(400).json({ error: 'Username already exists' });
     }
 
-    // Check if the phone number already exists
     const existingPhone = await User.findOne({ phoneNumber });
     if (existingPhone) {
-      console.log('Phone number already exists:', phoneNumber); // Debug log
+      console.log('Phone number already exists:', phoneNumber); 
       return res.status(400).json({ error: 'Phone number already exists' });
     }
 
-    // Generate a random verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log('Generated verification code:', verificationCode); // Debug log
+    console.log('Generated verification code:', verificationCode); 
 
-    // Save the code and user details temporarily
     verificationCodes.set(email, { username, phoneNumber, password, verificationCode });
 
-    // Send the verification code via email
     const transporter = nodemailer.createTransport({
       service: 'Gmail',
       auth: {
-        user: 'tnegussie14@gmail.com', // Replace with your Gmail address
-        pass: 'itve nhev cdcy sihv', // Replace with the generated App Password
+        user: 'tnegussie14@gmail.com', 
+        pass: 'itve nhev cdcy sihv', 
       },
     });
 
@@ -115,46 +105,52 @@ app.post('/register', async (req, res) => {
 
     res.status(201).json({ message: 'Verification code sent to your email' });
   } catch (error) {
-    console.error('Error during registration:', error); // Log the error
+    console.error('Error during registration:', error); 
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Verification endpoint
 app.post('/verify', async (req, res) => {
   const { email, verificationCode } = req.body;
 
-  console.log('Received verification data:', req.body); // Debug log
-
   if (!email || !verificationCode) {
-    console.log('Missing required fields'); // Debug log
     return res.status(400).json({ error: 'Email and verification code are required' });
   }
 
   try {
-    // Check if the verification code matches
     const userData = verificationCodes.get(email);
     if (!userData || userData.verificationCode !== verificationCode) {
       return res.status(400).json({ error: 'Invalid verification code' });
     }
 
-    // Save the user to the database
     const hashedPassword = await bcrypt.hash(userData.password, 10);
+    const parsedPhoneNumber = parsePhoneNumberFromString(userData.phoneNumber, 'ET');
+    const normalizedPhoneNumber = parsedPhoneNumber ? parsedPhoneNumber.number : userData.phoneNumber;
+
     const newUser = new User({
       username: userData.username,
       email,
-      phoneNumber: userData.phoneNumber,
+      phoneNumber: normalizedPhoneNumber, // <-- always save normalized!
       password: hashedPassword,
     });
     await newUser.save();
-
-    // Remove the verification code from temporary storage
     verificationCodes.delete(email);
 
-    console.log('User registered successfully:', newUser); // Debug log
-    res.status(201).json({ message: 'User registered successfully' });
+    const token = jwt.sign({ id: newUser._id, email: newUser.email }, process.env.JWT_SECRET, {
+      expiresIn: '1h',
+    });
+
+    res.status(201).json({
+      token,
+      user: {
+        id: newUser._id,
+        username: newUser.username,
+        email: newUser.email,
+      },
+    });
+
   } catch (error) {
-    console.error('Error during verification:', error); // Debug log
+    console.error('Error during verification:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -187,6 +183,7 @@ app.post('/login', async (req, res) => {
     res.json({
       token,
       user: {
+        id: user._id,
         username: user.username,
         email: user.email,
       },
@@ -201,7 +198,7 @@ app.post('/login', async (req, res) => {
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   console.log('Authorization Header:', req.headers['authorization']);
-  const token = authHeader && authHeader.split(' ')[1]; // Properly extract token
+  const token = authHeader && authHeader.split(' ')[1]; 
 
   if (!token) {
     return res.status(401).json({ error: 'Access denied. No token provided.' });
@@ -229,7 +226,7 @@ const searchLimiter = rateLimit({
 
 // Secured /search endpoint
 app.get('/search', authenticateToken, async (req, res) => {
-  console.log('Authenticated user:', req.user); // Debug log
+  console.log('Authenticated user:', req.user); 
   const { phoneNumber } = req.query;
 
   if (!phoneNumber) {
@@ -266,19 +263,20 @@ app.get('/search', authenticateToken, async (req, res) => {
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
+  // Register user to their own room for signaling
+  socket.on('register_user', (userId) => {
+    socket.join(userId);
+    console.log(`[SOCKET] User ${userId} registered and joined their personal room (socket.id: ${socket.id})`);
+  });
+
   // Handle group message sending
   socket.on('send_group_message', async (data) => {
-    console.log('Received send_group_message event:', data);
-
     const { groupId, sender, content } = data;
-
     if (!groupId || !sender || !content) {
-      console.error('Missing required fields for send_group_message');
+      console.error('Missing fields in send_group_message:', data);
       return;
     }
-
     try {
-      // Save the message to the database
       const message = new Message({
         sender,
         groupId,
@@ -286,17 +284,14 @@ io.on('connection', (socket) => {
         isGroup: true,
         timestamp: new Date(),
       });
-
       await message.save();
       console.log('Message saved to database:', message);
-
-      // Emit the message to all members of the group
       io.to(groupId).emit('group_message', {
+        groupId,
         sender,
         content: message.content,
         timestamp: message.timestamp,
       });
-
       console.log(`Message emitted to group ${groupId}:`, {
         sender,
         content: message.content,
@@ -309,31 +304,35 @@ io.on('connection', (socket) => {
 
   // Handle joining groups
   socket.on('join_groups', (groupIds) => {
-    console.log('Received groupIds:', groupIds);
-
     if (!Array.isArray(groupIds)) {
-      console.warn('groupIds is not an array. Wrapping it in an array.');
-      groupIds = [groupIds];
+      console.warn('join_groups payload is not an array:', groupIds);
+      return;
     }
-
-    groupIds.forEach((groupId) => {
-      socket.join(groupId);
-      console.log(`User ${socket.id} joined group: ${groupId}`);
+    groupIds.forEach(groupId => {
+      if (groupId) {
+        socket.join(groupId);
+        console.log(`User ${socket.id} joined group ${groupId}`);
+      }
     });
   });
 
   socket.on('join_room', (roomId) => {
     socket.join(roomId);
     console.log(`User ${socket.id} joined room: ${roomId}`);
+    // Print all sockets in the room
+    const room = io.sockets.adapter.rooms.get(roomId);
+    console.log(`Current sockets in room ${roomId}:`, room ? Array.from(room) : []);
   });
+
+  function normalizeRoomId(user1, user2) {
+    return user1 < user2 ? `${user1}_${user2}` : `${user2}_${user1}`;
+  }
 
   // Handle sending messages
   socket.on('send_message', async (data) => {
     console.log('Received send_message event:', data);
-
     const { roomId, sender, receiver, content, timestamp } = data;
-
-    // Validate required fields
+    const normalizedRoomId = normalizeRoomId(sender, receiver);
     if (!roomId || !sender || !receiver || !content || !timestamp) {
       console.error('Missing required fields for send_message:', {
         roomId: !!roomId,
@@ -344,9 +343,7 @@ io.on('connection', (socket) => {
       });
       return;
     }
-
     try {
-      // Save the message to the database
       const message = new Message({
         sender,
         receiver,
@@ -355,19 +352,15 @@ io.on('connection', (socket) => {
         isGroup: false,
         timestamp: new Date(timestamp),
       });
-
       await message.save();
       console.log('Message saved to database:', message);
-
-      // Emit the message to the sender and receiver
-      io.to(roomId).emit('receive_message', {
+      io.to(normalizedRoomId).emit('receive_message', {
         sender,
         receiver,
         content: message.content,
         timestamp: message.timestamp,
       });
-
-      console.log(`Message emitted to room ${roomId}:`, {
+      console.log(`Message emitted to room ${normalizedRoomId}:`, {
         sender,
         receiver,
         content: message.content,
@@ -378,11 +371,75 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle disconnection
+  // --- CALL SIGNALING EVENTS ---
+
+  // When caller starts the call (ring the receiver)
+
+
+  // When caller starts the call (ring the receiver)
+  socket.on('call_initiate', (data) => {
+    console.log(`[SOCKET] call_initiate: from=${data.from}, to=${data.to}, callerName=${data.callerName}`);
+    io.to(data.to).emit('incoming_call', {
+      from: data.from,
+      voiceOnly: data.voiceOnly,
+      callerName: data.callerName,
+    });
+    console.log(`[SOCKET] Emitting incoming_call to: ${data.to}`);
+  });
+
+  // When receiver accepts the call, send the offer to the callee
+  socket.on('call_offer', (data) => {
+    // data: { to, from, offer, voiceOnly, callerName }
+    console.log(`Call offer from ${data.from} to ${data.to}`);
+    io.to(data.to).emit('call_offer', {
+      offer: data.offer,
+      from: data.from,
+      voiceOnly: data.voiceOnly,
+      callerName: data.callerName,
+    });
+  });
+
+  // Receiver answers the call
+  socket.on('make_answer', (data) => {
+    console.log(`Answer from ${data.from} to ${data.to}`);
+    io.to(data.to).emit('answer_made', {
+      answer: data.answer,
+      from: data.from,
+    });
+  });
+
+  // ICE candidates exchange
+  socket.on('ice_candidate', (data) => {
+    io.to(data.to).emit('ice_candidate', {
+      candidate: data.candidate,
+      from: data.from,
+    });
+  });
+
+  // When receiver declines the call
+  socket.on('decline_call', (data) => {
+    console.log(`Call declined by ${data.from} to ${data.to}`);
+    io.to(data.to).emit('call_declined', {
+      from: data.from,
+    });
+  });
+
+  // Optional: call ended
+  socket.on('end_call', (data) => {
+    console.log(`Call ended by ${data.from} for ${data.to}`);
+    io.to(data.to).emit('call_ended', { from: data.from });
+  });
+
+  socket.on('join_group', (groupId) => {
+    socket.join(groupId);
+    console.log(`User ${socket.id} joined group: ${groupId}`);
+  });
+
   socket.on('disconnect', () => {
     console.log('A user disconnected:', socket.id);
   });
 });
+
 
 // API route to send message (for compatibility if needed)
 app.post('/messages', async (req, res) => {
@@ -481,15 +538,18 @@ app.get('/conversations', async (req, res) => {
     const conversations = await Message.aggregate([
       {
         $match: {
-          $or: [
-            { sender: user },
-            { receiver: user },
-          ],
+          $and: [
+            {
+              $or: [
+                { sender: user },
+                { receiver: user },
+              ],
+            },
+            { isGroup: { $ne: true } }
+          ]
         },
       },
-      {
-        $sort: { timestamp: -1 },
-      },
+      { $sort: { timestamp: -1 } },
       {
         $group: {
           _id: {
@@ -502,10 +562,23 @@ app.get('/conversations', async (req, res) => {
           latestMessage: { $first: '$$ROOT' },
         },
       },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id", // or "username" if you use usernames
+          as: "userInfo"
+        }
+      },
+      {
+        $addFields: {
+          otherUser: { $arrayElemAt: ["$userInfo.username", 0] }
+        }
+      }
     ]);
 
     res.json(conversations.map((conv) => ({
-      otherUser: conv._id,
+      otherUser: conv.otherUser || conv._id,
       message: conv.latestMessage.content || '[No Content]',
       timestamp: conv.latestMessage.timestamp || new Date().toISOString(),
     })));
@@ -526,8 +599,8 @@ app.post('/groups', authenticateToken, async (req, res) => {
     const group = new Group({
       name,
       description,
-      members: [req.user.id, ...members], // Add the creator as the first member
-      createdBy: req.user.id,
+      members: [req.user.id, ...members], // Add creator as a member
+      createdBy: req.user.id, // Optionally track who created the group
     });
 
     await group.save();
@@ -547,10 +620,6 @@ app.post('/groups/:groupId/add', authenticateToken, async (req, res) => {
 
     if (!group) {
       return res.status(404).json({ error: 'Group not found' });
-    }
-
-    if (group.admin.toString() !== req.user.id) {
-      return res.status(403).json({ error: 'Only the group admin can add members' });
     }
 
     group.members.push(...members);
@@ -580,6 +649,19 @@ app.get('/groups', authenticateToken, async (req, res) => {
     res.json(groups);
   } catch (error) {
     console.error('Error fetching groups:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.get('/groups/:groupId', authenticateToken, async (req, res) => {
+  const { groupId } = req.params;
+  try {
+    const group = await Group.findById(groupId).lean();
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+    res.json(group);
+  } catch (error) {
+    console.error('Error fetching group:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -639,13 +721,28 @@ app.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+app.get('/groups/:groupId/last-message', authenticateToken, async (req, res) => {
+  const { groupId } = req.params;
+  try {
+    const lastMessage = await Message.findOne({ groupId })
+      .sort({ timestamp: -1 })
+      .lean();
+    if (!lastMessage) {
+      return res.json(null);
+    }
+    res.json(lastMessage);
+  } catch (error) {
+    console.error('Error fetching last group message:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.get('/users', authenticateToken, async (req, res) => {
   try {
     // Fetch all users except the current user
     const users = await User.find(
       { _id: { $ne: req.user.id } }, // Exclude the current user
-      'username email' // Only return username and email
+      '_id username email' // <-- include _id
     );
     res.json(users);
   } catch (error) {
