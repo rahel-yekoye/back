@@ -260,8 +260,26 @@ app.get('/search', authenticateToken, async (req, res) => {
 });
 
 // Real-time Socket.IO connection
+const userIdToSocketId = {};
+
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
+
+  socket.on('register_user', (userId) => {
+    userIdToSocketId[userId] = socket.id;
+    // Optionally join a room named after the userId
+    socket.join(userId);
+    console.log(`[SOCKET] User ${userId} registered (socket.id: ${socket.id})`);
+  });
+
+  socket.on('disconnect', () => {
+    for (const [userId, sId] of Object.entries(userIdToSocketId)) {
+      if (sId === socket.id) {
+        delete userIdToSocketId[userId];
+        break;
+      }
+    }
+  });
 
   // Register user to their own room for signaling
   socket.on('register_user', (userId) => {
@@ -388,25 +406,32 @@ io.on('connection', (socket) => {
   });
 
   // When receiver accepts the call, send the offer to the callee
-  socket.on('call_offer', (data) => {
-    // data: { to, from, offer, voiceOnly, callerName }
-    console.log(`Call offer from ${data.from} to ${data.to}`);
-    io.to(data.to).emit('call_offer', {
-      offer: data.offer,
-      from: data.from,
-      voiceOnly: data.voiceOnly,
-      callerName: data.callerName,
-    });
+socket.on('call_offer', (data) => {
+  // data: { to, from, offer, type, voiceOnly, callerName }
+  console.log(`Call offer from ${data.from} to ${data.to}`);
+  io.to(data.to).emit('call_offer', {
+    offer: data.offer,
+    type: data.type, // <-- ADD THIS LINE
+    from: data.from,
+    voiceOnly: data.voiceOnly,
+    callerName: data.callerName,
   });
-
+});
   // Receiver answers the call
-  socket.on('make_answer', (data) => {
+  /*socket.on('answer_made', (data) => {
     console.log(`Answer from ${data.from} to ${data.to}`);
     io.to(data.to).emit('answer_made', {
-      answer: data.answer,
-      from: data.from,
+            from: data.from,
+            answer: data.answer,
     });
+  });*/
+socket.on('call_cancelled', (data) => {
+  console.log(`[SOCKET] call_cancelled: from=${data.from}, to=${data.to}`);
+  io.to(data.to).emit('call_cancelled', {
+    from: data.from,
+    to: data.to,
   });
+});
 
   // ICE candidates exchange
   socket.on('ice_candidate', (data) => {
@@ -437,6 +462,19 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('A user disconnected:', socket.id);
+  });
+
+  socket.on('make_answer', (data) => {
+    const targetSocketId = userIdToSocketId[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('answer_made', {
+        answer: data.answer,
+        from: data.from,
+      });
+      console.log(`[DEBUG] Sent answer_made to socket ${targetSocketId}`);
+    } else {
+      console.log(`[ERROR] No socket found for user ${data.to}`);
+    }
   });
 });
 
