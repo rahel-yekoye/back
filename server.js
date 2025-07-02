@@ -22,6 +22,7 @@ const fs = require('fs');
 const port = 4000;
 
 const verificationCodes = new Map();
+const callTimers = {};
 
 const server = http.createServer(app);
 
@@ -267,7 +268,7 @@ io.on('connection', (socket) => {
 
   socket.on('register_user', (userId) => {
     userIdToSocketId[userId] = socket.id;
-    // Optionally join a room named after the userId
+  socket.data.userId = userId;
     socket.join(userId);
     console.log(`[SOCKET] User ${userId} registered (socket.id: ${socket.id})`);
   });
@@ -282,10 +283,6 @@ io.on('connection', (socket) => {
   });
 
   // Register user to their own room for signaling
-  socket.on('register_user', (userId) => {
-    socket.join(userId);
-    console.log(`[SOCKET] User ${userId} registered and joined their personal room (socket.id: ${socket.id})`);
-  });
 
   // Handle group message sending
   socket.on('send_group_message', async (data) => {
@@ -347,47 +344,192 @@ io.on('connection', (socket) => {
   }
 
   // Handle sending messages
-  socket.on('send_message', async (data) => {
-    console.log('Received send_message event:', data);
-    const { roomId, sender, receiver, content, timestamp } = data;
-    const normalizedRoomId = normalizeRoomId(sender, receiver);
-    if (!roomId || !sender || !receiver || !content || !timestamp) {
-      console.error('Missing required fields for send_message:', {
-        roomId: !!roomId,
-        sender: !!sender,
-        receiver: !!receiver,
-        content: !!content,
-        timestamp: !!timestamp,
+socket.on('send_message', async (data) => {
+  console.log('Received send_message event:', data);
+
+  const { roomId, sender, receiver, content, timestamp, fileUrl } = data;
+  const normalizedRoomId = normalizeRoomId(sender, receiver);
+
+  if (!roomId || !sender || !receiver || !timestamp) {
+    console.error('Missing required fields for send_message:', {
+      roomId: !!roomId,
+      sender: !!sender,
+      receiver: !!receiver,
+      content: !!content,
+      timestamp: !!timestamp,
+    });
+    return;
+  }
+
+  try {
+    // Save the message
+    const message = new Message({
+      sender,
+      receiver,
+      content,
+      roomId,
+      isGroup: false,
+      timestamp: new Date(timestamp),
+      fileUrl: fileUrl || '',
+      visibleTo: [sender, receiver],
+      readBy: [sender], // ✅ Sender has already seen the message
+    });
+
+    await message.save();
+    console.log('Message saved to database:', message);
+
+    // Emit the actual chat message to all users in the room
+    io.to(normalizedRoomId).emit('receive_message', {
+      sender,
+      receiver,
+      content: message.content,
+      timestamp: message.timestamp,
+      fileUrl: message.fileUrl,
+      messageId: message._id.toString(),
+    });
+
+    console.log(`Message emitted to room ${normalizedRoomId}:`, {
+      sender,
+      receiver,
+      content: message.content,
+      timestamp: message.timestamp,
+      fileUrl: message.fileUrl,
+    });
+
+    // Check if receiver is currently in the room (active chat)
+    const room = io.sockets.adapter.rooms.get(normalizedRoomId);
+    const receiverSocketId = userIdToSocketId[receiver];
+
+    if (room && receiverSocketId && room.has(receiverSocketId)) {
+      // Receiver is in the room - mark message as read immediately
+      await Message.updateOne(
+        { _id: message._id },
+        { $addToSet: { readBy: receiver } }
+      );
+
+      // Emit message_read event to everyone in the room
+      io.to(normalizedRoomId).emit('message_read', {
+        messageId: message._id.toString(),
+        reader: receiver,
       });
+      console.log(`Message marked as read by receiver ${receiver} in room ${normalizedRoomId}`);
+    }
+
+    // ✅ Emit separate conversation updates for inbox screens
+    // So each user sees the correct "otherUser" in their list
+
+    const updateForReceiver = {
+      otherUser: sender, // 't' sees 'r'
+      message: message.content,
+      timestamp: message.timestamp.toISOString(),
+      isGroup: false,
+    };
+
+    const updateForSender = {
+      otherUser: receiver, // 'r' sees 't'
+      message: message.content,
+      timestamp: message.timestamp.toISOString(),
+      isGroup: false,
+    };
+
+    io.to(receiver).emit('conversation_update', updateForReceiver);
+    io.to(sender).emit('conversation_update', updateForSender);
+
+  } catch (error) {
+    console.error('Error saving or emitting message:', error);
+  }
+});
+
+socket.on('mark_as_read', async ({ user, otherUser }) => {
+  if (!user || !otherUser) return;
+
+  const roomId = normalizeRoomId(user, otherUser);
+
+  try {
+    // Find and update messages not read yet by this user
+    const messagesToUpdate = await Message.find({
+      roomId,
+      visibleTo: user,
+      readBy: { $ne: user },
+    });
+
+    if (messagesToUpdate.length === 0) {
       return;
     }
-    try {
-      const message = new Message({
-        sender,
-        receiver,
-        content,
-        roomId,
-        isGroup: false,
-        timestamp: new Date(timestamp),
+
+    const messageIds = messagesToUpdate.map(msg => msg._id);
+    await Message.updateMany(
+      { _id: { $in: messageIds } },
+      { $addToSet: { readBy: user } }
+    );
+
+    const readMessageIds = messageIds.map(id => id.toString());
+
+    console.log(`[READ] ${readMessageIds.length} messages marked as read by ${user}`);
+
+    // Emit to receiver (the otherUser) if online
+    const senderSocketId = userIdToSocketId[otherUser];
+    if (senderSocketId) {
+      io.to(senderSocketId).emit('messages_read', {
+        reader: user,
+        messageIds: readMessageIds,
       });
-      await message.save();
-      console.log('Message saved to database:', message);
-      io.to(normalizedRoomId).emit('receive_message', {
-        sender,
-        receiver,
-        content: message.content,
-        timestamp: message.timestamp,
-      });
-      console.log(`Message emitted to room ${normalizedRoomId}:`, {
-        sender,
-        receiver,
-        content: message.content,
-        timestamp: message.timestamp,
-      });
-    } catch (error) {
-      console.error('Error saving or emitting message:', error);
     }
-  });
+
+    // Optionally emit to the room as well
+    io.to(roomId).emit('messages_read', {
+      reader: user,
+      messageIds: readMessageIds,
+    });
+
+  } catch (err) {
+    console.error('[ERROR] Failed to mark messages as read:', err);
+  }
+});
+
+
+// PUT /messages/mark-read
+// Request body: { user: 'username', otherUser: 'username' }
+
+app.put('/messages/mark-read', async (req, res) => {
+  const { user, otherUser } = req.body;
+
+  if (!user || !otherUser) return res.status(400).json({ error: 'Missing parameters' });
+
+  const roomId = normalizeRoomId(user, otherUser);
+
+  try {
+    const messagesToUpdate = await Message.find({
+      roomId,
+      visibleTo: user,
+      readBy: { $ne: user },
+    });
+
+    const messageIds = messagesToUpdate.map(msg => msg._id);
+    await Message.updateMany(
+      { _id: { $in: messageIds } },
+      { $addToSet: { readBy: user } }
+    );
+
+    const readMessageIds = messageIds.map(id => id.toString());
+
+    // Notify the receiver (otherUser) if online
+    const senderSocketId = userIdToSocketId[otherUser];
+    if (senderSocketId) {
+      io.to(senderSocketId).emit('messages_read', {
+        reader: user,
+        messageIds: readMessageIds,
+      });
+    }
+
+    res.json({ success: true, updatedCount: readMessageIds.length });
+
+  } catch (err) {
+    console.error('Error marking messages as read:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
   // --- CALL SIGNALING EVENTS ---
 
@@ -403,6 +545,23 @@ io.on('connection', (socket) => {
       callerName: data.callerName,
     });
     console.log(`[SOCKET] Emitting incoming_call to: ${data.to}`);
+
+    // Start missed call timer
+    const callKey = `${data.from}_${data.to}`;
+    callTimers[callKey] = setTimeout(() => {
+      // Call not answered in 30 seconds
+      const missedCallMsg = {
+        sender: data.from,
+        receiver: data.to,
+        content: 'Missed call',
+        type: 'missed_call',
+        timestamp: new Date().toISOString(),
+        visibleTo: [data.to],
+      };
+      Message.create(missedCallMsg);
+      io.to(data.to).emit('missed_call', missedCallMsg);
+      delete callTimers[callKey];
+    }, 30000); // 30 seconds
   });
 
   // When receiver accepts the call, send the offer to the callee
@@ -431,6 +590,34 @@ socket.on('call_cancelled', (data) => {
     from: data.from,
     to: data.to,
   });
+  // Save missed call message to DB
+  const missedCallMsg = {
+    sender: data.from,
+    receiver: data.to,
+    content: 'Missed call',
+    type: 'missed_call',
+    timestamp: new Date().toISOString(),
+    visibleTo: [data.to], // Only callee should see
+  };
+  // Save to DB (pseudo-code)
+  Message.create(missedCallMsg);
+  // Notify callee
+  io.to(data.to).emit('missed_call', missedCallMsg);
+  // Do NOT notify the caller
+
+  // For the caller (cancelled call)
+  const cancelledCallMsg = {
+    sender: data.from,
+    receiver: data.to,
+    content: 'Cancelled call',
+    type: 'cancelled_call',
+    timestamp: new Date().toISOString(),
+    visibleTo: [data.from], // Only caller should see
+  };
+  // Save to DB (optional)
+  Message.create(cancelledCallMsg);
+  // Notify ONLY the caller
+  io.to(data.from).emit('cancelled_call', cancelledCallMsg);
 });
 
   // ICE candidates exchange
@@ -450,10 +637,13 @@ socket.on('call_cancelled', (data) => {
   });
 
   // Optional: call ended
-  socket.on('end_call', (data) => {
-    console.log(`Call ended by ${data.from} for ${data.to}`);
-    io.to(data.to).emit('call_ended', { from: data.from });
-  });
+  // Optional: call ended
+socket.on('end_call', (data) => {
+  console.log(`Call ended by ${data.from} for ${data.to}`);
+  // Notify BOTH users
+  io.to(data.to).emit('call_ended', { from: data.from, to: data.to });
+  io.to(data.from).emit('call_ended', { from: data.from, to: data.to });
+});
 
   socket.on('join_group', (groupId) => {
     socket.join(groupId);
@@ -475,6 +665,41 @@ socket.on('call_cancelled', (data) => {
     } else {
       console.log(`[ERROR] No socket found for user ${data.to}`);
     }
+  });
+
+  // When a call ends after being answered
+  function emitCallLog(callerId, calleeId, durationSeconds) {
+    console.log('Emitting call log:', callerId, calleeId, durationSeconds);
+    // For caller (outgoing)
+    const outgoingLog = {
+      sender: callerId,
+      receiver: calleeId,
+      type: 'call_log',
+      direction: 'outgoing',
+      duration: durationSeconds,
+      timestamp: new Date().toISOString(),
+      content: 'Outgoing call',
+      visibleTo: [callerId]
+    };
+    // For callee (incoming)
+    const incomingLog = {
+      sender: calleeId,
+      receiver: callerId,
+      type: 'call_log',
+      direction: 'incoming',
+      duration: durationSeconds,
+      timestamp: new Date().toISOString(),
+      content: 'Incoming call',
+      visibleTo: [calleeId]
+    };
+    io.to(callerId).emit('call_log', outgoingLog);
+    io.to(calleeId).emit('call_log', incomingLog);
+    Message.create(outgoingLog);
+    Message.create(incomingLog);
+  }
+
+  socket.on('join', (userId) => {
+    socket.join(userId);
   });
 });
 
@@ -515,18 +740,25 @@ app.post('/messages', async (req, res) => {
 
 // API route to get chat history
 app.get('/messages', async (req, res) => {
-  const { user1, user2 } = req.query;
+  const { user1, user2, currentUser } = req.query;
 
-  if (!user1 || !user2) {
-    return res.status(400).json({ error: 'Both user1 and user2 are required' });
+  if (!user1 || !user2 || !currentUser) {
+    return res.status(400).json({ error: 'user1, user2, and currentUser are required' });
   }
 
   try {
     const messages = await Message.find({
-      $or: [
-        { sender: user1, receiver: user2 },
-        { sender: user2, receiver: user1 },
-      ],
+      $and: [
+        {
+          $or: [
+            { sender: user1, receiver: user2 },
+            { sender: user2, receiver: user1 },
+          ]
+        },
+        {
+          visibleTo: currentUser
+        }
+      ]
     }).sort({ timestamp: 1 });
 
     res.json(messages);
@@ -558,10 +790,8 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-  res.status(200).json({
-    message: 'File uploaded successfully',
-    fileUrl: `http://localhost:${port}/uploads/${req.file.filename}`,
-  });
+  const fileUrl = `http://localhost:4000/uploads/${req.file.filename}`;
+  res.json({ fileUrl });
 });
 
 // API route to get all conversations for a user
