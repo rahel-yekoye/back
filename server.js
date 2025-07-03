@@ -441,51 +441,26 @@ socket.on('send_message', async (data) => {
 });
 
 socket.on('mark_as_read', async ({ user, otherUser }) => {
-  if (!user || !otherUser) return;
+  const roomId = [user, otherUser].sort().join('_');
+  const messages = await Message.find({
+    roomId,
+    readBy: { $ne: user }, // unread by this user
+    receiver: user,        // only mark ones received
+  });
 
-  const roomId = normalizeRoomId(user, otherUser);
+const messageIds = messages.map(msg => msg._id.toString());
 
-  try {
-    // Find and update messages not read yet by this user
-    const messagesToUpdate = await Message.find({
-      roomId,
-      visibleTo: user,
-      readBy: { $ne: user },
-    });
+  await Message.updateMany(
+    { _id: { $in: messageIds } },
+    { $addToSet: { readBy: user } }
+  );
 
-    if (messagesToUpdate.length === 0) {
-      return;
-    }
-
-    const messageIds = messagesToUpdate.map(msg => msg._id);
-    await Message.updateMany(
-      { _id: { $in: messageIds } },
-      { $addToSet: { readBy: user } }
-    );
-
-    const readMessageIds = messageIds.map(id => id.toString());
-
-    console.log(`[READ] ${readMessageIds.length} messages marked as read by ${user}`);
-
-    // Emit to receiver (the otherUser) if online
-    const senderSocketId = userIdToSocketId[otherUser];
-    if (senderSocketId) {
-      io.to(senderSocketId).emit('messages_read', {
-        reader: user,
-        messageIds: readMessageIds,
-      });
-    }
-
-    // Optionally emit to the room as well
-    io.to(roomId).emit('messages_read', {
-      reader: user,
-      messageIds: readMessageIds,
-    });
-
-  } catch (err) {
-    console.error('[ERROR] Failed to mark messages as read:', err);
-  }
+  io.to(roomId).emit('messages_read', {
+    messageIds,
+    reader: user,
+  });
 });
+
 
 
 // PUT /messages/mark-read
@@ -790,7 +765,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-  const fileUrl = `http://localhost:4000/uploads/${req.file.filename}`;
+  const fileUrl = `http://192.168.20.143:4000/uploads/${req.file.filename}`;
   res.json({ fileUrl });
 });
 
@@ -1020,6 +995,7 @@ app.get('/users', authenticateToken, async (req, res) => {
 });
 
 // Start server with socket.io attached
-server.listen(port, () => {
-  console.log(`🚀 Server is running with real-time on http://localhost:${port}`);
+server.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${port}`);
 });
+
