@@ -775,7 +775,9 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-  const fileUrl = `http://192.168.137.145:4000/uploads/${req.file.filename}`;
+const ip = req.headers.host; // e.g., "192.168.137.145:4000"
+const fileUrl = `http://${ip}/uploads/${req.file.filename}`;
+res.json({ fileUrl });
   res.json({ fileUrl });
 });
 
