@@ -1106,7 +1106,8 @@ class SocketService {
 
     final completer = Completer<void>();
 
-    _socket = IO.io('http://192.168.20.143:4000', <String, dynamic>{
+    _socket = IO.io('http://192.168.137.145
+:4000', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': false,
     });
@@ -1504,7 +1505,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchMessages() async {
     final url = Uri.parse(
-        'http://192.168.20.143:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}');
+        'http://192.168.137.145:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {

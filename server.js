@@ -979,6 +979,36 @@ app.get('/groups/:groupId/last-message', authenticateToken, async (req, res) => 
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// DELETE a message (soft delete)
+app.delete('/messages/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    // Ensure user is sender or receiver
+    if (message.sender !== req.user.id && message.receiver !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to delete this message' });
+    }
+
+    // Soft delete (hide from current user only)
+    await Message.updateOne({ _id: id }, { $pull: { visibleTo: req.user.id } });
+
+    // Optionally: emit deletion over socket
+    io.to(message.roomId || message.groupId).emit('message_deleted', {
+      messageId: id,
+      user: req.user.id,
+    });
+
+    res.json({ success: true, message: 'Message deleted' });
+  } catch (err) {
+    console.error('Error deleting message:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.get('/users', authenticateToken, async (req, res) => {
   try {
