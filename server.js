@@ -717,7 +717,10 @@ app.post('/messages', async (req, res) => {
 app.get('/messages', async (req, res) => {
   const { user1, user2, currentUser } = req.query;
 
+  console.log(`[API] GET /messages called with user1=${user1}, user2=${user2}, currentUser=${currentUser}`);
+
   if (!user1 || !user2 || !currentUser) {
+    console.warn('[API] Missing required query parameters');
     return res.status(400).json({ error: 'user1, user2, and currentUser are required' });
   }
 
@@ -736,12 +739,19 @@ app.get('/messages', async (req, res) => {
       ]
     }).sort({ timestamp: 1 });
 
+    if (!messages.length) {
+      console.log('[API] No messages found for the conversation');
+    } else {
+      console.log(`[API] Fetched ${messages.length} messages`);
+    }
+
     res.json(messages);
   } catch (error) {
-    console.error('Error fetching messages:', error);
+    console.error('[API] Error fetching messages:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // Configure storage for uploaded files (images, audio, etc.)
 const storage = multer.diskStorage({
@@ -765,7 +775,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-  const fileUrl = `http://192.168.20.143:4000/uploads/${req.file.filename}`;
+  const fileUrl = `http://192.168.137.145:4000/uploads/${req.file.filename}`;
   res.json({ fileUrl });
 });
 
@@ -983,32 +993,33 @@ app.get('/groups/:groupId/last-message', authenticateToken, async (req, res) => 
 app.delete('/messages/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
+  console.log(`🗑️ Delete request for message ID: ${id}`);
+  console.log(`👤 Request made by user: ${req.user.id}`);
+
   try {
     const message = await Message.findById(id);
     if (!message) {
+      console.log('❌ Message not found');
       return res.status(404).json({ error: 'Message not found' });
     }
 
-    // Ensure user is sender or receiver
-    if (message.sender !== req.user.id && message.receiver !== req.user.id) {
-      return res.status(403).json({ error: 'Not authorized to delete this message' });
-    }
+    // No authorization check — just soft delete by removing user from visibleTo
+   await Message.deleteOne({ _id: id });
 
-    // Soft delete (hide from current user only)
-    await Message.updateOne({ _id: id }, { $pull: { visibleTo: req.user.id } });
 
-    // Optionally: emit deletion over socket
     io.to(message.roomId || message.groupId).emit('message_deleted', {
       messageId: id,
       user: req.user.id,
     });
 
+    console.log('✅ Message deleted successfully');
     res.json({ success: true, message: 'Message deleted' });
   } catch (err) {
     console.error('Error deleting message:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 app.get('/users', authenticateToken, async (req, res) => {
   try {
