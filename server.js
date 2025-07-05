@@ -679,6 +679,7 @@ socket.on('end_call', (data) => {
 });
 
 
+
 // API route to send message (for compatibility if needed)
 app.post('/messages', async (req, res) => {
   try {
@@ -775,7 +776,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-const ip = req.headers.host; // e.g., "192.168.137.145:4000"
+const ip = req.headers.host; // e.g., "10.202.42.143:4000"
 const fileUrl = `http://${ip}/uploads/${req.file.filename}`;
 res.json({ fileUrl });
   res.json({ fileUrl });
@@ -991,34 +992,69 @@ app.get('/groups/:groupId/last-message', authenticateToken, async (req, res) => 
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// DELETE a message (soft delete)
-app.delete('/messages/:id', authenticateToken, async (req, res) => {
-  const { id } = req.params;
+/// DELETE /messages/:id  (or POST /messages/delete-many for batch delete)
+// Example using Express + MongoDB
+// Add a test route to verify server is reachable
+app.get('/health', (req, res) => {
+  console.log('✅ Health check route hit');
+  res.send('OK');
+});
 
-  console.log(`🗑️ Delete request for message ID: ${id}`);
-  console.log(`👤 Request made by user: ${req.user.id}`);
+app.delete('/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`🗑️ Attempting to delete message with ID: ${id}`);
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    console.warn(`⚠️ Invalid ObjectId format for ID: ${id}`);
+    return res.status(400).json({ error: 'Invalid message ID format' });
+  }
 
   try {
-    const message = await Message.findById(id);
-    if (!message) {
-      console.log('❌ Message not found');
+    const deleted = await Message.findByIdAndDelete(id);
+    if (!deleted) {
+      console.warn(`⚠️ Message with ID ${id} not found`);
       return res.status(404).json({ error: 'Message not found' });
     }
 
-    // No authorization check — just soft delete by removing user from visibleTo
-   await Message.deleteOne({ _id: id });
-
-
-    io.to(message.roomId || message.groupId).emit('message_deleted', {
-      messageId: id,
-      user: req.user.id,
+    console.log('✅ Deleted message:', {
+      id: deleted._id,
+      content: deleted.content,
+      fileUrl: deleted.fileUrl,
     });
 
-    console.log('✅ Message deleted successfully');
-    res.json({ success: true, message: 'Message deleted' });
+    res.status(200).json({ message: 'Deleted successfully' });
   } catch (err) {
-    console.error('Error deleting message:', err);
+    console.error(`❌ Error deleting message ID ${id}:`, err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+app.post('/messages/delete-many', async (req, res) => {
+  const { ids } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    console.warn('⚠️ No valid IDs provided for delete-many');
+    return res.status(400).json({ error: 'No valid IDs provided' });
+  }
+
+  // Validate all IDs are valid ObjectIds
+  const invalidIds = ids.filter(id => !mongoose.Types.ObjectId.isValid(id));
+  if (invalidIds.length > 0) {
+    console.warn(`⚠️ Invalid ObjectId(s) detected: ${invalidIds.join(', ')}`);
+    return res.status(400).json({ error: 'One or more invalid IDs' });
+  }
+
+  try {
+    console.log('🗑️ Request to delete messages:', ids);
+
+    const result = await Message.deleteMany({ _id: { $in: ids } });
+    console.log(`✅ Deleted ${result.deletedCount} message(s) from DB.`);
+
+    res.json({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error('❌ Delete many error:', error);
+    res.status(500).json({ error: 'Failed to delete messages' });
   }
 });
 
@@ -1035,6 +1071,10 @@ app.get('/users', authenticateToken, async (req, res) => {
     console.error('Error fetching users:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+app.use((req, res, next) => {
+  console.log(`❓ Incoming request: ${req.method} ${req.url}`);
+  next();
 });
 
 // Start server with socket.io attached
