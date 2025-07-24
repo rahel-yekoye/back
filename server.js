@@ -283,53 +283,79 @@ io.on('connection', (socket) => {
   });
 
   // Register user to their own room for signaling
+// Handle group message sending
+socket.on('send_group_message', async (data) => {
+  const { groupId, sender, content, clientId, fileUrl } = data;
+  console.log('📥 Received send_group_message:', data);
 
-  // Handle group message sending
-  socket.on('send_group_message', async (data) => {
-    const { groupId, sender, content } = data;
-    if (!groupId || !sender || !content) {
-      console.error('Missing fields in send_group_message:', data);
-      return;
-    }
-    try {
-      const message = new Message({
-        sender,
-        groupId,
-        content,
-        isGroup: true,
-        timestamp: new Date(),
-      });
-      await message.save();
-      console.log('Message saved to database:', message);
-      io.to(groupId).emit('group_message', {
-        groupId,
-        sender,
-        content: message.content,
-        timestamp: message.timestamp,
-      });
-      console.log(`Message emitted to group ${groupId}:`, {
-        sender,
-        content: message.content,
-        timestamp: message.timestamp,
-      });
-    } catch (error) {
-      console.error('Error saving or emitting message:', error);
-    }
-  });
+  if (!groupId || !sender || (!content && !fileUrl)) {
+    console.error('❌ Missing fields in send_group_message:', data);
+    return;
+  }
 
-  // Handle joining groups
-  socket.on('join_groups', (groupIds) => {
-    if (!Array.isArray(groupIds)) {
-      console.warn('join_groups payload is not an array:', groupIds);
-      return;
-    }
-    groupIds.forEach(groupId => {
-      if (groupId) {
-        socket.join(groupId);
-        console.log(`User ${socket.id} joined group ${groupId}`);
-      }
+  try {
+    const message = new Message({
+      sender,
+      groupId,
+      content,
+      isGroup: true,
+      timestamp: new Date(),
+      clientId: clientId || null,    // ✅ Save clientId
+      fileUrl: fileUrl || '',        // ✅ Save fileUrl
     });
+
+    await message.save();
+    console.log('✅ Message saved to database:', message);
+
+    io.to(groupId).emit('group_message', {
+      _id: message._id.toString(),        // ✅ Optional but ideal for syncing
+      clientId: message.clientId,
+      groupId,
+      sender,
+      content: message.content,
+      timestamp: message.timestamp,
+      fileUrl: message.fileUrl,
+    });
+
+    console.log(`📤 Message emitted to group ${groupId}:`, {
+      sender,
+      content: message.content,
+      timestamp: message.timestamp,
+      clientId: message.clientId,
+      fileUrl: message.fileUrl,
+    });
+  } catch (error) {
+    console.error('❌ Error saving or emitting message:', error);
+  }
+});
+
+// Handle joining groups
+socket.on('join_group', (groupIds) => {
+  console.log('📥 Received join_group payload:', groupIds);
+
+  // Defensive check: accept string or array of strings
+  if (typeof groupIds === 'string') {
+    groupIds = [groupIds];
+  }
+
+  if (!Array.isArray(groupIds)) {
+    console.warn('⚠️ join_group payload is neither string nor array:', groupIds);
+    return;
+  }
+
+  groupIds.forEach((groupId, index) => {
+    if (typeof groupId === 'string' && groupId.trim().length > 0) {
+      socket.join(groupId);
+      console.log(`Socket ${socket.id} joined room ${groupId}`);
+console.log('Current clients in room:', io.sockets.adapter.rooms.get(groupId));
+
+      socket.emit('joined_group', groupId); // Used by frontend to confirm
+      console.log(`✅ User ${socket.id} joined group [${index}]: ${groupId}`);
+    } else {
+      console.warn(`⚠️ Empty or invalid groupId at index ${index}:`, groupId);
+    }
   });
+});
 
   socket.on('join_room', (roomId) => {
     socket.join(roomId);
@@ -343,15 +369,26 @@ io.on('connection', (socket) => {
     return user1 < user2 ? `${user1}_${user2}` : `${user2}_${user1}`;
   }
 
-  // Handle sending messages
+// Handle sending messages
 socket.on('send_message', async (data) => {
-  console.log('Received send_message event:', data);
+  console.log('📨 Received send_message event:', data);
 
-  const { roomId, sender, receiver, content, timestamp, fileUrl } = data;
+  // Destructure with clientId included
+  const {
+    roomId,
+    sender,
+    receiver,
+    content,
+    timestamp,
+    fileUrl,
+    clientId,
+  } = data;
+
   const normalizedRoomId = normalizeRoomId(sender, receiver);
 
+  // Validate required fields
   if (!roomId || !sender || !receiver || !timestamp) {
-    console.error('Missing required fields for send_message:', {
+    console.error('❌ Missing required fields for send_message:', {
       roomId: !!roomId,
       sender: !!sender,
       receiver: !!receiver,
@@ -362,7 +399,7 @@ socket.on('send_message', async (data) => {
   }
 
   try {
-    // Save the message
+    // Construct message
     const message = new Message({
       sender,
       receiver,
@@ -372,61 +409,65 @@ socket.on('send_message', async (data) => {
       timestamp: new Date(timestamp),
       fileUrl: fileUrl || '',
       visibleTo: [sender, receiver],
-      readBy: [sender], // ✅ Sender has already seen the message
+      readBy: [sender],
+      direction: 'outgoing',
+      clientId: clientId || null, // ✅ Save clientId if needed for tracking
     });
 
     await message.save();
-    console.log('Message saved to database:', message);
+    console.log('✅ Message saved to database:', message);
 
-    // Emit the actual chat message to all users in the room
+    // Emit to room: client can filter by clientId to avoid duplication
     io.to(normalizedRoomId).emit('receive_message', {
-      sender,
-      receiver,
+      _id: message._id,
+      sender: message.sender,
+      receiver: message.receiver,
+      roomId: message.roomId,
       content: message.content,
-      timestamp: message.timestamp,
       fileUrl: message.fileUrl,
-      messageId: message._id.toString(),
+      isGroup: message.isGroup,
+      isFile: !!message.fileUrl,
+      deleted: message.deleted,
+      edited: message.edited,
+      direction: 'incoming',
+      duration: message.duration ?? null,
+      timestamp: message.timestamp.toISOString(),
+      readBy: message.readBy,
+      visibleTo: message.visibleTo,
+      emojis: message.emojis,
+      clientId: message.clientId, // ✅ Echo back to allow deduplication
     });
 
-    console.log(`Message emitted to room ${normalizedRoomId}:`, {
-      sender,
-      receiver,
-      content: message.content,
-      timestamp: message.timestamp,
-      fileUrl: message.fileUrl,
-    });
+    console.log(`📤 Message emitted to room ${normalizedRoomId}`);
 
-    // Check if receiver is currently in the room (active chat)
+    // Mark as read immediately if receiver is in the room
     const room = io.sockets.adapter.rooms.get(normalizedRoomId);
     const receiverSocketId = userIdToSocketId[receiver];
 
     if (room && receiverSocketId && room.has(receiverSocketId)) {
-      // Receiver is in the room - mark message as read immediately
       await Message.updateOne(
         { _id: message._id },
         { $addToSet: { readBy: receiver } }
       );
 
-      // Emit message_read event to everyone in the room
       io.to(normalizedRoomId).emit('message_read', {
         messageId: message._id.toString(),
         reader: receiver,
       });
-      console.log(`Message marked as read by receiver ${receiver} in room ${normalizedRoomId}`);
+
+      console.log(`✅ Message marked as read by ${receiver}`);
     }
 
-    // ✅ Emit separate conversation updates for inbox screens
-    // So each user sees the correct "otherUser" in their list
-
+    // Emit conversation updates (inbox-style)
     const updateForReceiver = {
-      otherUser: sender, // 't' sees 'r'
+      otherUser: sender,
       message: message.content,
       timestamp: message.timestamp.toISOString(),
       isGroup: false,
     };
 
     const updateForSender = {
-      otherUser: receiver, // 'r' sees 't'
+      otherUser: receiver,
       message: message.content,
       timestamp: message.timestamp.toISOString(),
       isGroup: false,
@@ -436,7 +477,7 @@ socket.on('send_message', async (data) => {
     io.to(sender).emit('conversation_update', updateForSender);
 
   } catch (error) {
-    console.error('Error saving or emitting message:', error);
+    console.error('❌ Error saving or emitting message:', error);
   }
 });
 
@@ -622,6 +663,9 @@ socket.on('end_call', (data) => {
 
   socket.on('join_group', (groupId) => {
     socket.join(groupId);
+    console.log(`Socket ${socket.id} joined room ${groupId}`);
+console.log('Current clients in room:', io.sockets.adapter.rooms.get(groupId));
+
     console.log(`User ${socket.id} joined group: ${groupId}`);
   });
 
@@ -776,10 +820,9 @@ app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
-const ip = req.headers.host; // e.g., "10.202.42.143:4000"
+const ip = req.headers.host; // e.g., "localhost:4000"
 const fileUrl = `http://${ip}/uploads/${req.file.filename}`;
 res.json({ fileUrl });
-  res.json({ fileUrl });
 });
 
 // API route to get all conversations for a user
@@ -926,7 +969,7 @@ app.post('/groups/:groupId/messages', authenticateToken, async (req, res) => {
   const { groupId } = req.params;
   const { content } = req.body;
 
-  if (!content) {
+if (!content && !fileUrl) {
     return res.status(400).json({ error: 'Message content is required' });
   }
 
@@ -1058,6 +1101,27 @@ app.post('/messages/delete-many', async (req, res) => {
   }
 });
 
+app.put('/messages/:id', async (req, res) => {
+  const messageId = req.params.id;
+  const { content } = req.body;
+
+  try {
+    const updatedMessage = await Message.findByIdAndUpdate(
+      messageId,
+      { content, edited: true },
+      { new: true }
+    );
+
+    if (!updatedMessage) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    res.json(updatedMessage);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.get('/users', authenticateToken, async (req, res) => {
   try {
@@ -1072,6 +1136,7 @@ app.get('/users', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 app.use((req, res, next) => {
   console.log(`❓ Incoming request: ${req.method} ${req.url}`);
   next();

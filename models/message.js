@@ -16,6 +16,8 @@ const messageSchema = new mongoose.Schema({
   readBy: { type: [String], default: [] },    // Array of userIds/usernames
   timestamp: { type: Date, default: Date.now },
   visibleTo: [{ type: String }], // Array of user IDs/usernames who should see this message
+  clientId: { type: String, default: null }, // ✅ Add this
+
 });
 
 // Expose the auto-generated _id as 'id' in JSON
